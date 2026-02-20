@@ -1,0 +1,395 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>BOTC: Teensyville Master Engine</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="main-layout">
+<div id="sidebar">
+<h3>Teensyville Script</h3>
+<div class="script-section"><strong class="good-text">Townsfolk</strong><p>Empath, Investigator, Sage, Seamstress, Fortune Teller, Monk</p></div>
+<div class="script-section"><strong class="good-text">Outsiders</strong><p>Moonchild, Klutz</p></div>
+<div class="script-section"><strong class="evil-text">Minions</strong><p>Poisoner, Pit Hag</p></div>
+<div class="script-section"><strong class="evil-text">Demon</strong><p>Imp</p></div>
+<hr>
+<h3>Claims Log</h3>
+<div id="claim-log">No chats yet.</div>
+</div>
+
+<div id="game-container">
+<h1 id="phase-label">Teensyville Setup</h1>
+<div id="day-interface" class="hidden">
+<p id="chat-status"></p>
+<div id="chat-box" class="hidden"><p id="chat-text"></p><div id="chat-options"></div></div>
+<div id="trial-area" class="hidden">
+<h2 id="trial-title">Trial</h2>
+<div id="vote-display">Votes: 0</div>
+<button id="user-vote-btn" onclick="userVotes()">Raise Hand (Vote)</button>
+</div>
+</div>
+
+<div id="grimoire" class="grimoire"></div>
+
+<div id="night-phase" class="hidden">
+<h2 id="night-header">Night</h2>
+<div id="night-action-prompt"></div>
+<div id="selection-area"></div>
+<button id="nextPhaseBtn" class="hidden" onclick="goToDay()">Wake Up</button>
+</div>
+
+<div class="controls">
+<button onclick="revealAll()">Reveal Grimoire</button>
+<button onclick="window.location.reload()">Reset Game</button>
+<button id="next-night-btn" class="hidden" onclick="startNightCycle()">Go to Night</button>
+</div>
+</div>
+</div>
+<script src="script.js"></script>
+</body>
+</html>
+
+
+body { font-family: 'Segoe UI', sans-serif; background: #121212; color: white; margin: 0; }
+#main-layout { display: flex; min-height: 100vh; }
+#sidebar { width: 260px; background: #1e1e1e; padding: 20px; border-right: 2px solid #333; text-align: left; font-size: 0.9em; }
+.good-text { color: #3498db; } .evil-text { color: #e74c3c; }
+#game-container { flex-grow: 1; padding: 40px; text-align: center; }
+.hidden { display: none; }
+.grimoire { display: flex; flex-wrap: wrap; justify-content: center; gap: 30px; margin: 40px; }
+
+.token {
+width: 100px; height: 100px; background: #2c3e50; border: 3px solid #555;
+border-radius: 50%; display: flex; align-items: center; justify-content: center;
+cursor: pointer; position: relative; transition: 0.3s; font-weight: bold;
+}
+.token::before { content: attr(data-label); position: absolute; top: -30px; font-size: 11px; color: #888; }
+.token.user-token { box-shadow: 0 0 20px #f1c40f; transform: scale(1.1); }
+.token.dead { opacity: 0.4; filter: grayscale(1); border-color: #000 !important; }
+.token.dead::after { content: "✗"; position: absolute; font-size: 40px; color: red; }
+.token.voting-now { border-color: #fff !important; box-shadow: 0 0 15px #fff; }
+.token.has-voted { background: #f1c40f !important; color: #000 !important; }
+
+#chat-box, #night-phase { background: #2c3e50; padding: 20px; border-radius: 10px; margin: 10px auto; max-width: 500px; border: 1px solid #444; }
+button { background: #444; color: white; border: none; padding: 8px 15px; margin: 5px; cursor: pointer; border-radius: 4px; }
+button:hover { background: #666; }
+.nominate-btn { background: #c0392b !important; font-size: 10px; width: 100%; position: absolute; bottom: -20px; }
+
+
+const fullScript = {
+townsfolk: ["Empath", "Investigator", "Sage", "Seamstress", "Fortune Teller", "Monk"],
+outsiders: ["Moonchild", "Klutz"],
+minions: ["Poisoner", "Pit Hag"],
+demons: ["Imp"]
+};
+let characters = [], userRole = null, poisonedIdx = null, redHerringIdx = null;
+let dayNumber = 1, aliveStatus = [true, true, true, true, true, true], chatsRemaining = 2;
+let relationships = {}, userClaims = {}, hostilePlayers = [], seamstressUsed = false;
+let monkTarget = null, nightDeathIdx = null, pendingMoonchildKill = null, currentVotes = 0, userIsVoting = false, isDay = false;
+
+function generateGamePool() {
+let pool = [];
+let tf = [...fullScript.townsfolk].sort(() => 0.5 - Math.random()).slice(0, 3);
+tf.forEach(name => pool.push({ name, team: "good" }));
+pool.push({ name: fullScript.outsiders[Math.floor(Math.random()*2)], team: "good" });
+pool.push({ name: fullScript.minions[Math.floor(Math.random()*2)], team: "evil" });
+pool.push({ name: "Imp", team: "evil" });
+pool = pool.sort(() => 0.5 - Math.random());
+const ftIdx = pool.findIndex(c => c.name === "Fortune Teller");
+if (ftIdx !== -1) {
+const goodExcludeFT = pool.map((c, i) => i).filter(i => pool[i].team === "good" && i !== ftIdx);
+redHerringIdx = goodExcludeFT[Math.floor(Math.random() * goodExcludeFT.length)];
+}
+return pool;
+}
+
+function initGame() {
+characters = generateGamePool();
+const grimoire = document.getElementById('grimoire');
+characters.forEach((char, i) => {
+const token = document.createElement('div');
+token.className = 'token'; token.id = `token-${i}`;
+token.setAttribute('data-label', `Player ${i+1}`);
+token.innerText = "?";
+token.onclick = () => {
+if (!userRole) {
+userRole = char; token.innerText = char.name;
+token.classList.add('revealed', 'user-token', char.team);
+startNightCycle();
+} else if (isDay && chatsRemaining > 0 && i !== characters.indexOf(userRole) && aliveStatus[i]) {
+startChat(i);
+}
+};
+grimoire.appendChild(token);
+});
+}
+
+function startNightCycle() {
+isDay = false; document.getElementById('grimoire').classList.add('hidden');
+document.getElementById('day-interface').classList.add('hidden');
+document.getElementById('night-phase').classList.remove('hidden');
+document.getElementById('next-night-btn').classList.add('hidden');
+nightDeathIdx = null; monkTarget = null;
+
+if (pendingMoonchildKill !== null) {
+if (pendingMoonchildKill !== poisonedIdx) {
+aliveStatus[pendingMoonchildKill] = false;
+document.getElementById(`token-${pendingMoonchildKill}`).classList.add('dead');
+nightDeathIdx = pendingMoonchildKill;
+}
+pendingMoonchildKill = null;
+}
+runNightOrder(0);
+}
+
+function runNightOrder(step) {
+const order = ["Poisoner", "Pit Hag", "Monk", "Imp", "Investigator", "Fortune Teller", "Empath", "Seamstress", "Sage"];
+if (step >= order.length) { document.getElementById('nextPhaseBtn').classList.remove('hidden'); return; }
+
+const roleName = order[step];
+const roleIdx = characters.findIndex(c => c.name === roleName);
+const userIdx = characters.indexOf(userRole);
+const isUser = (userIdx === roleIdx);
+const isAlive = (roleIdx !== -1 && aliveStatus[roleIdx]);
+const isPoisoned = (roleIdx === poisonedIdx);
+const prompt = document.getElementById('night-action-prompt');
+
+if (!isAlive && roleName !== "Sage") return runNightOrder(step + 1);
+
+if (roleName === "Poisoner") {
+if (isUser) {
+prompt.innerHTML = "<b>Poisoner:</b> Poison someone:";
+renderSelection(1, (t) => { poisonedIdx = t; runNightOrder(step + 1); });
+} else { poisonedIdx = Math.random() < 0.7 ? Math.floor(Math.random()*6) : null; runNightOrder(step+1); }
+} else if (roleName === "Pit Hag") {
+if (isUser && !isPoisoned) {
+prompt.innerHTML = "<b>Pit Hag:</b> Transform player:";
+renderSelection(1, (t) => {
+let options = "<b>New Role:</b><br>";
+[...fullScript.townsfolk, "Imp"].forEach(r => {
+options += `<button onclick="finalizePitHag(${t}, '${r}', ${step})">${r}</button>`;
+});
+prompt.innerHTML = options;
+});
+} else runNightOrder(step+1);
+} else if (roleName === "Monk" && dayNumber > 1) {
+if (isUser && !isPoisoned) {
+prompt.innerHTML = "<b>Monk:</b> Protect someone (not self):";
+renderSelection(1, (t) => { if(t !== userIdx) { monkTarget = t; runNightOrder(step+1); }});
+} else { monkTarget = (roleIdx !== -1) ? Math.floor(Math.random()*6) : null; runNightOrder(step+1); }
+} else if (roleName === "Imp" && dayNumber > 1) {
+if (isUser && !isPoisoned) {
+prompt.innerHTML = "<b>Imp:</b> Kill someone:";
+renderSelection(1, (t) => { handleDeath(t, 'demon'); runNightOrder(step+1); });
+} else { if(!isPoisoned) handleDeath(Math.floor(Math.random()*6), 'demon'); runNightOrder(step+1); }
+} else if (roleName === "Investigator" && dayNumber === 1) {
+if (isUser) {
+const minion = characters.find(c => c.team === 'evil' && c.name !== 'Imp');
+let mIdx = characters.indexOf(minion);
+// Ensure Investigator doesn't see themselves
+let otherIdx = (mIdx + 1) % 6;
+if (otherIdx === userIdx) otherIdx = (otherIdx + 1) % 6;
+let shown = isPoisoned ? [(userIdx+1)%6, (userIdx+2)%6] : [mIdx, otherIdx];
+prompt.innerHTML = `<b>Investigator:</b> P${shown[0]+1} or P${shown[1]+1} is the Minion.`;
+setTimeout(() => runNightOrder(step+1), 3500);
+} else runNightOrder(step+1);
+} else if (roleName === "Fortune Teller") {
+if (isUser) {
+prompt.innerHTML = "<b>Fortune Teller:</b> Check 2 players:";
+renderSelection(2, (ts) => {
+let res = ts.some(t => characters[t].name === "Imp" || t === redHerringIdx);
+if (isPoisoned) res = !res;
+prompt.innerHTML = `Result: ${res ? "YES" : "NO"}`;
+setTimeout(() => runNightOrder(step+1), 2000);
+});
+} else runNightOrder(step+1);
+} else if (roleName === "Empath") {
+if (isUser) {
+let count = characters.filter((c, i) => (i === (userIdx+1)%6 || i === (userIdx+5)%6) && c.team === 'evil' && aliveStatus[i]).length;
+if (isPoisoned) count = (count === 0) ? 1 : 0;
+prompt.innerHTML = `<b>Empath:</b> You sense ${count} evil neighbors.`;
+setTimeout(() => runNightOrder(step+1), 2000);
+} else runNightOrder(step+1);
+} else if (roleName === "Seamstress" && !seamstressUsed) {
+if (isUser) {
+prompt.innerHTML = "<b>Seamstress:</b> Use ability? <button onclick='useSeamstress(true, "+step+")'>Yes</button><button onclick='useSeamstress(false, "+step+")'>No</button>";
+} else runNightOrder(step+1);
+} else if (roleName === "Sage" && nightDeathIdx === roleIdx) {
+const dIdx = characters.findIndex(c => c.name === "Imp");
+// Ensure Sage doesn't see a dead player
+let otherIdx = (dIdx + 1) % 6;
+while (!aliveStatus[otherIdx] || otherIdx === dIdx) { otherIdx = (otherIdx + 1) % 6; }
+let shown = isPoisoned ? [(dIdx+2)%6, (dIdx+3)%6] : [dIdx, otherIdx];
+if (isUser) prompt.innerHTML = `<b>Sage:</b> Player ${shown[0]+1} or ${shown[1]+1} is the Demon.`;
+setTimeout(() => runNightOrder(step+1), 4000);
+} else runNightOrder(step+1);
+}
+
+function handleDeath(t, cause = 'demon') {
+if (t === monkTarget && cause === 'demon') return;
+aliveStatus[t] = false; nightDeathIdx = t;
+document.getElementById(`token-${t}`).classList.add('dead');
+if (characters[t].name === "Moonchild") {
+alert("Moonchild died! Select someone to die tomorrow night.");
+renderSelection(1, (target) => { pendingMoonchildKill = target; });
+} else if (characters[t].name === "Klutz") {
+alert("Klutz died! Pick a player. If EVIL, you lose.");
+renderSelection(1, (target) => { if(characters[target].team === 'evil') endGame("EVIL WINS! Klutz picked evil."); });
+}
+checkWin();
+}
+
+function goToDay() {
+isDay = true; chatsRemaining = 2; hostilePlayers = [];
+document.getElementById('night-phase').classList.add('hidden');
+document.getElementById('day-interface').classList.remove('hidden');
+document.getElementById('grimoire').classList.remove('hidden');
+document.getElementById('phase-label').innerText = `Day ${dayNumber}`;
+document.getElementById('chat-status').innerText = "Socializing: 2 chats remaining.";
+if (nightDeathIdx !== null) alert(`Player ${nightDeathIdx+1} died.`);
+refreshGrimoire();
+}
+
+async function runTrial(nIdx) {
+document.getElementById('trial-area').classList.remove('hidden');
+currentVotes = 0; userIsVoting = false;
+const thresh = Math.ceil(aliveStatus.filter(a => a).length / 2);
+for (let i = 0; i < 6; i++) {
+if (!aliveStatus[i]) continue;
+const t = document.getElementById(`token-${i}`); t.classList.add('voting-now');
+if (i === characters.indexOf(userRole)) await new Promise(r => setTimeout(r, 2500));
+else {
+await new Promise(r => setTimeout(r, 800));
+const s = relationships[i];
+let v = (s === 'hard') ? userIsVoting : (s === 'cagey' ? !userIsVoting : Math.random() > 0.5);
+if (v && i !== nIdx) { currentVotes++; t.classList.add('has-voted'); }
+}
+t.classList.remove('voting-now');
+document.getElementById('vote-display').innerText = `Votes: ${currentVotes} (Need ${thresh})`;
+}
+if (currentVotes >= thresh) {
+aliveStatus[nIdx] = false;
+document.getElementById(`token-${nIdx}`).classList.add('dead');
+alert("Executed!");
+if (characters[nIdx].name === "Imp") endGame("GOOD WINS! The Demon was executed.");
+else { triggerOutsiderAbility(nIdx); checkWin(); }
+} else alert("Pardoned.");
+document.getElementById('trial-area').classList.add('hidden');
+document.querySelectorAll('.has-voted').forEach(e => e.classList.remove('has-voted'));
+document.getElementById('next-night-btn').classList.remove('hidden');
+dayNumber++;
+}
+
+function checkWin() {
+const demonIdx = characters.findIndex(c => c.name === "Imp");
+if (demonIdx === -1 || !aliveStatus[demonIdx]) endGame("GOOD WINS! Demon is dead.");
+else if (aliveStatus.filter(a => a).length <= 2) endGame("EVIL WINS! Town is decimated.");
+}
+
+function endGame(m) { alert(m); revealAll(); document.getElementById('next-night-btn').classList.add('hidden'); }
+
+// ... Previous Helper Functions (finalizePitHag, startChat, handleApproach, finalizeChat, updateLog, finishSocial, refreshGrimoire, userVotes, renderSelection, revealAll, useSeamstress, triggerOutsiderAbility) ...
+
+function finalizePitHag(target, role, step) {
+if (characters.some(c => c.name === role)) { alert("Role already in play!"); }
+else { characters[target].name = role; characters[target].team = (role === "Imp") ? "evil" : "good"; }
+runTrialExecutionWinCheck(); // Safety check if Imp is removed
+runNightOrder(step + 1);
+}
+
+function startChat(idx) {
+const box = document.getElementById('chat-box');
+box.classList.remove('hidden');
+document.getElementById('chat-text').innerText = `Chat with P${idx+1}:`;
+document.getElementById('chat-options').innerHTML = `<button onclick="handleApproach(${idx}, 'hard')">Hard Claim</button><button onclick="handleApproach(${idx}, '3for3')">3 for 3</button><button onclick="handleApproach(${idx}, 'cagey')">Cagey</button>`;
+}
+
+function handleApproach(idx, s) {
+relationships[idx] = s;
+if (userRole.team === 'evil' && s !== 'cagey') {
+let m = "<b>Claim:</b><br>";
+fullScript.townsfolk.forEach(r => m += `<button onclick="finalizeChat(${idx},'${r}')">${r}</button>`);
+document.getElementById('chat-options').innerHTML = m;
+} else finalizeChat(idx, 'cagey');
+}
+
+function finalizeChat(idx, c) {
+let r = (c !== 'cagey' && characters[idx].name === c) ? `Liar! I'm the ${c}!` : "Okay.";
+if (r.includes('Liar')) hostilePlayers.push(idx);
+if (c !== 'cagey') { userClaims[idx] = c; updateLog(); }
+alert(`P${idx+1}: ${r}`);
+chatsRemaining--;
+document.getElementById('chat-box').classList.add('hidden');
+document.getElementById('chat-status').innerText = `${chatsRemaining} chats remaining.`;
+if (chatsRemaining === 0) finishSocial();
+}
+
+function updateLog() { document.getElementById('claim-log').innerHTML = Object.entries(userClaims).map(([i,r]) => `P${+i+1}: ${r}`).join('<br>'); }
+
+function finishSocial() {
+document.getElementById('chat-status').innerText = "Nominations Open."; refreshGrimoire();
+if (hostilePlayers.length > 0) {
+setTimeout(() => { alert(`P${hostilePlayers[0]+1} nominates you!`); runTrial(characters.indexOf(userRole)); }, 1000);
+}
+}
+
+function refreshGrimoire() {
+characters.forEach((_, i) => {
+const t = document.getElementById(`token-${i}`); t.classList.remove('greyed-out');
+if (chatsRemaining === 0 && aliveStatus[i] && !t.querySelector('.nominate-btn')) {
+const b = document.createElement('button'); b.className = 'nominate-btn'; b.innerText = "NOMINATE";
+b.onclick = (e) => { e.stopPropagation(); runTrial(i); }; t.appendChild(b);
+}
+});
+}
+
+function userVotes() {
+userIsVoting = !userIsVoting;
+const myIdx = characters.indexOf(userRole);
+document.getElementById('user-vote-btn').innerText = userIsVoting ? "Lower Hand" : "Raise Hand";
+if (userIsVoting) { currentVotes++; document.getElementById(`token-${myIdx}`).classList.add('has-voted'); }
+else { currentVotes--; document.getElementById(`token-${myIdx}`).classList.remove('has-voted'); }
+document.getElementById('vote-display').innerText = `Votes: ${currentVotes}`;
+}
+
+function renderSelection(count, callback) {
+const area = document.getElementById('selection-area'); area.innerHTML = "";
+let sel = [];
+characters.forEach((_, i) => {
+const b = document.createElement('button'); b.innerText = `P${i+1}`;
+b.onclick = () => { if(!sel.includes(i)) { sel.push(i); b.style.background="#007BFF"; if(sel.length===count) { area.innerHTML=""; callback(sel); }}};
+area.appendChild(b);
+});
+}
+
+function useSeamstress(val, step) {
+if (!val) return runNightOrder(step + 1);
+seamstressUsed = true;
+renderSelection(2, (ts) => {
+let same = characters[ts[0]].team === characters[ts[1]].team;
+if (characters.indexOf(userRole) === poisonedIdx) same = !same;
+document.getElementById('night-action-prompt').innerHTML = `Result: ${same ? "SAME" : "DIFFERENT"}`;
+setTimeout(() => runNightOrder(step + 1), 2500);
+});
+}
+
+function triggerOutsiderAbility(t) {
+if (characters[t].name === "Moonchild") {
+alert("Moonchild died! Select someone to die tomorrow.");
+renderSelection(1, (target) => { pendingMoonchildKill = target; });
+} else if (characters[t].name === "Klutz") {
+alert("Klutz died! If P[Selection] is Evil, you lose.");
+renderSelection(1, (target) => { if(characters[target].team === 'evil') endGame("EVIL WINS! Klutz picked evil."); });
+}
+}
+
+function revealAll() {
+document.querySelectorAll('.token').forEach((t, i) => {
+t.innerText = characters[i].name; t.classList.remove('greyed-out');
+t.classList.add('revealed', characters[i].team);
+});
+}
+
+window.onload = initGame;
